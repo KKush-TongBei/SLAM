@@ -507,6 +507,13 @@ class RobotController:
                 if cell_cost == float('inf'):
                     continue
 
+                # 禁止对角穿角：斜走时两侧正交格不能是障碍
+                if dc != 0 and dr != 0:
+                    side_a = costmap[current[1], current[0] + dc]
+                    side_b = costmap[current[1] + dr, current[0]]
+                    if side_a == float('inf') or side_b == float('inf'):
+                        continue
+
                 # 移动成本：直线为1, 对角线为sqrt(2)
                 move_cost = 1.0 if dc == 0 or dr == 0 else math.sqrt(2)
                 
@@ -753,8 +760,14 @@ class RobotController:
         goal = self.exit_pose[:2]
         self._execute_path_following_task(goal, "MISSION_COMPLETE")
 
+    def _position_collides(self, x, y):
+        """检查机器人中心是否与真实墙体碰撞（环境栅格已按半径膨胀）"""
+        if self.env is None:
+            return False
+        return self.env.is_occupied(x, y)
+
     def _apply_movement(self, dt, forward_speed, turn_rate):
-        """将速度和角速度应用到机器人上（无碰撞检测）"""
+        """将速度和角速度应用到机器人上，并阻止穿墙"""
         turn_rate = np.clip(turn_rate, -self.angular_speed, self.angular_speed)
         dtheta = turn_rate * dt
         next_theta = self.theta + dtheta
@@ -762,8 +775,25 @@ class RobotController:
         
         dx = forward_speed * math.cos(self.theta) * dt
         dy = forward_speed * math.sin(self.theta) * dt
-        self.x += dx
-        self.y += dy
+
+        # 分步推进，避免一步跨过薄墙
+        step_len = math.hypot(dx, dy)
+        max_step = 0.02
+        n_steps = max(1, int(math.ceil(step_len / max_step))) if step_len > 0 else 0
+        sx, sy = (dx / n_steps, dy / n_steps) if n_steps else (0.0, 0.0)
+
+        for _ in range(n_steps):
+            next_x = self.x + sx
+            next_y = self.y + sy
+            # 允许沿墙滑动：先试完整步，再分别试 x / y
+            if not self._position_collides(next_x, next_y):
+                self.x, self.y = next_x, next_y
+            elif not self._position_collides(next_x, self.y):
+                self.x = next_x
+            elif not self._position_collides(self.x, next_y):
+                self.y = next_y
+            else:
+                break  # 正面撞墙，停止本帧平移
         
         self.trajectory_x.append(self.x)
         self.trajectory_y.append(self.y)
